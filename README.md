@@ -14,7 +14,7 @@ A small web app for practicing interval recognition, from a minor 2nd up to an o
 - **Keyboard shortcuts** on desktop: `R` or `Space` replays, `1`–`=` answers, `Enter` goes to the next question.
 - Your selection is remembered between visits. Light and dark themes follow your system setting.
 
-The sound is synthesized in the browser with the Web Audio API, so there are no audio files or dependencies.
+The sound is a recorded grand piano (see Credits), played with the Web Audio API. If the samples can't load, it falls back to a synthesized tone.
 
 ## Run locally
 
@@ -24,9 +24,21 @@ The sound is synthesized in the browser with the Web Audio API, so there are no 
 
 Then open `_site/index.html` in a browser.
 
-`app.html` is the source (a page fragment); the build script wraps it in a full HTML document.
+`app.html` is the source (a page fragment); the build script wraps it in a full HTML document and copies `piano-samples.js` next to it.
+
+`piano-samples.js` holds 12 short piano notes (C3 to A5, every minor third) as base64 MP3. Other notes are pitch-shifted by at most one semitone. To regenerate it, download the npm package `@audio-samples/piano-mp3-velocity10` and run:
+
+```bash
+./scripts/make-piano-samples.sh path/to/package/audio
+```
+
+This needs `ffmpeg`.
 
 ## Deploy
 
 `.github/workflows/pages.yml` publishes the site to GitHub Pages on every push to `main`. To turn it on once:
 go to **Settings → Pages → Build and deployment → Source** and choose **GitHub Actions**.
+
+## Credits
+
+Piano samples: [Salamander Grand Piano V3](https://archive.org/details/SalamanderGrandPianoV3) recorded by Alexander Holm, licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/). The samples here are trimmed to 3.2 seconds and mixed to mono.

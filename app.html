@@ -240,6 +240,11 @@ button { font: inherit; color: inherit; }
 .mode-desc { font-size: .8125rem; color: var(--muted); }
 
 .sound-note { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: .9375rem; }
+.credit { margin: 0; padding-bottom: 16px; font-size: .75rem; color: var(--muted); }
+.credit a { color: inherit; }
+.play.is-loading { cursor: progress; opacity: .75; }
+.play.is-loading .play-label { font-size: 0; }
+.play.is-loading .play-label::after { content: "Loading…"; font-size: .8125rem; }
 .last { margin: 0; font-size: .9375rem; color: var(--muted); }
 .last b { color: var(--ink); font-variant-numeric: tabular-nums; }
 
@@ -422,6 +427,7 @@ button { font: inherit; color: inherit; }
 
 <div id="app" class="wrap" aria-live="off"></div>
 <noscript><p style="padding:16px">This trainer needs JavaScript to play sounds.</p></noscript>
+<script src="piano-samples.js" async id="piano-js"></script>
 
 <script>
 (function () {
@@ -543,10 +549,10 @@ button { font: inherit; color: inherit; }
       if (!AC) return null;
       var ctx = new AC();
       var comp = ctx.createDynamicsCompressor();
-      comp.threshold.value = -16; comp.knee.value = 12; comp.ratio.value = 4;
+      comp.threshold.value = -6; comp.knee.value = 6; comp.ratio.value = 3;
       comp.attack.value = 0.003; comp.release.value = 0.25;
       var master = ctx.createGain();
-      master.gain.value = 0.9;
+      master.gain.value = 1;
       master.connect(comp); comp.connect(ctx.destination);
       audio.ctx = ctx; audio.master = master;
     }
@@ -583,7 +589,76 @@ button { font: inherit; color: inherit; }
     });
   }
 
+  /* Recorded grand piano (piano-samples.js). Falls back to the synth tone above if it can't load. */
+  var piano = { buffers: null, done: false, promise: null };
+  var samplesScript = new Promise(function (res) {
+    if (window.PIANO_SAMPLES) return res();
+    var el = document.getElementById('piano-js');
+    if (!el) return res();
+    el.addEventListener('load', res);
+    el.addEventListener('error', res);
+    setTimeout(res, 20000);
+  });
+
+  function decodeSample(ctx, b64) {
+    return new Promise(function (res) {
+      try {
+        var bin = atob(b64), bytes = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        var p = ctx.decodeAudioData(bytes.buffer, res, function () { res(null); });
+        if (p && p.catch) p.catch(function () { res(null); });
+      } catch (e) { res(null); }
+    });
+  }
+
+  function loadPiano(ctx) {
+    if (piano.promise) return piano.promise;
+    piano.promise = samplesScript.then(function () {
+      var src = window.PIANO_SAMPLES || {};
+      var keys = Object.keys(src);
+      return Promise.all(keys.map(function (k) { return decodeSample(ctx, src[k]); })).then(function (bufs) {
+        var map = {}, n = 0;
+        bufs.forEach(function (b, i) { if (b) { map[keys[i]] = b; n++; } });
+        // All or nothing, so no note is ever pitch-shifted far from its recording.
+        piano.buffers = n > 0 && n === keys.length ? map : null;
+        piano.done = true;
+        app.setAttribute('data-sound', piano.buffers ? 'piano' : 'synth');
+        return piano.buffers;
+      });
+    });
+    return piano.promise;
+  }
+
+  // Play the nearest recorded note, pitch-shifted by at most one semitone.
+  function pianoNote(bus, midi, t, dur, vel) {
+    var ctx = audio.ctx, best = null;
+    Object.keys(piano.buffers).forEach(function (k) {
+      k = +k;
+      if (best === null || Math.abs(k - midi) < Math.abs(best - midi)) best = k;
+    });
+    var src = ctx.createBufferSource();
+    src.buffer = piano.buffers[best];
+    src.playbackRate.value = Math.pow(2, (midi - best) / 12);
+    var g = ctx.createGain();
+    g.gain.setValueAtTime(vel, t);
+    g.gain.setValueAtTime(vel, t + dur);
+    g.gain.setTargetAtTime(0, t + dur, 0.09); // damper comes down
+    src.connect(g); g.connect(bus);
+    src.start(t);
+    src.stop(t + dur + 0.6);
+  }
+
+  function setLoading(on) {
+    audio.loading = on;
+    var btn = app.querySelector('.play');
+    if (btn) {
+      btn.classList.toggle('is-loading', on);
+      btn.setAttribute('aria-busy', on ? 'true' : 'false');
+    }
+  }
+
   function stopSound() {
+    audio.token = (audio.token || 0) + 1;
     if (audio.bus && audio.ctx) {
       var b = audio.bus, t = audio.ctx.currentTime;
       try {
@@ -602,21 +677,42 @@ button { font: inherit; color: inherit; }
     var ctx = ensureAudio();
     if (!ctx) return;
     stopSound();
-    var bus = ctx.createGain();
-    bus.gain.value = 1;
-    bus.connect(audio.master);
-    audio.bus = bus;
-    var t = ctx.currentTime + 0.06;
-    if (mode === 'harm') {
-      tone(bus, notes[0], t, 2.3, 0.24);
-      tone(bus, notes[1], t, 2.3, 0.24);
-      setPlaying(2.1);
-    } else {
-      tone(bus, notes[0], t, 1.0, 0.3);
-      tone(bus, notes[1], t + 0.85, 1.9, 0.3);
-      setPlaying(2.6);
+    var token = audio.token;
+    function go() {
+      setLoading(false);
+      if (token !== audio.token) return; // a newer play or stop happened while loading
+      var bus = ctx.createGain();
+      bus.gain.value = 1;
+      bus.connect(audio.master);
+      audio.bus = bus;
+      var usePiano = !!piano.buffers;
+      var note = usePiano ? pianoNote : tone;
+      var t = ctx.currentTime + 0.05;
+      if (mode === 'harm') {
+        var hv = usePiano ? 1.0 : 0.24;
+        note(bus, notes[0], t, 2.4, hv);
+        note(bus, notes[1], t, 2.4, hv);
+        setPlaying(2.5);
+      } else {
+        var mv = usePiano ? 1.3 : 0.3;
+        note(bus, notes[0], t, 0.95, mv);
+        note(bus, notes[1], t + 0.9, 2.1, mv);
+        setPlaying(3.1);
+      }
     }
+    if (piano.done) go();
+    else { setLoading(true); loadPiano(ctx).then(go); }
   }
+
+  // Start decoding the piano on the first tap or key press, so it is ready by the first question.
+  function warmUp() {
+    document.removeEventListener('pointerdown', warmUp, true);
+    document.removeEventListener('keydown', warmUp, true);
+    var ctx = ensureAudio();
+    if (ctx) loadPiano(ctx);
+  }
+  document.addEventListener('pointerdown', warmUp, true);
+  document.addEventListener('keydown', warmUp, true);
 
   function setPlaying(sec) {
     clearTimeout(audio.timer);
@@ -815,7 +911,8 @@ button { font: inherit; color: inherit; }
       '<div class="bar">' +
         '<p class="bar-note' + (problem ? ' is-problem' : '') + '" id="start-note">' + note + '</p>' +
         '<button type="button" class="btn btn-primary" data-act="start" data-k="start" aria-describedby="start-note"' + (problem ? ' disabled' : '') + '>Start ' + ROUND + ' questions</button>' +
-      '</div>';
+      '</div>' +
+      '<p class="credit">Piano: Salamander Grand Piano recorded by Alexander Holm, <a href="https://creativecommons.org/licenses/by/3.0/" target="_blank" rel="noopener">CC BY 3.0</a>.</p>';
   }
 
   function playsText(q) {
@@ -914,7 +1011,7 @@ button { font: inherit; color: inherit; }
       '<section class="stage" aria-labelledby="screen-title">' +
         '<h1 class="sr-only" id="screen-title" tabindex="-1">Question ' + (s.index + 1) + ' of ' + ROUND + ', ' + mode.name.toLowerCase() + '</h1>' +
         '<div class="play-col">' +
-          '<button type="button" class="play' + (audio.playing ? ' is-playing' : '') + '" data-act="play" data-k="play" aria-label="' + (q.plays ? 'Replay' : 'Play') + ' the interval" aria-describedby="play-meta">' +
+          '<button type="button" class="play' + (audio.playing ? ' is-playing' : '') + (audio.loading ? ' is-loading' : '') + '" data-act="play" data-k="play" aria-label="' + (q.plays ? 'Replay' : 'Play') + ' the interval" aria-describedby="play-meta">' +
             '<span class="play-icon">' + (q.plays ? ICON_REPLAY : ICON_PLAY) + '</span><span class="play-label">' + (q.plays ? 'Replay' : 'Play') + '</span>' +
           '</button>' +
           '<p class="play-meta" id="play-meta">' + playsText(q) + '</p>' +
